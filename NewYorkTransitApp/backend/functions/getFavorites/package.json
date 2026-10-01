@@ -1,0 +1,11 @@
+{
+  "name": "get-favorites",
+  "version": "1.0.0",
+  "description": "Lambda: list a user's favorite transit lines",
+  "main": "index.js",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "typescript": "^5.5.3"
+  }
+}

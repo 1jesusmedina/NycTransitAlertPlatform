@@ -1,0 +1,60 @@
+# SAM CLI configuration for nyc-transit-alerts
+# Usage: sam build && sam deploy
+# Override environment: sam deploy --config-env staging
+
+version = 0.1
+
+[default.global.parameters]
+stack_name = "nyc-transit-alerts-prod"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+disable_rollback = false
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+template_file = "template.yaml"
+s3_bucket = ""          # SAM will create a managed bucket if left empty
+s3_prefix = "nyc-transit-alerts"
+parameter_overrides = [
+  "Environment=prod",
+  "MtaApiKey=REPLACE_ME",
+  "AllowedOrigin=*"
+]
+
+# ── Staging environment ────────────────────────────────────────────────────────
+
+[staging.global.parameters]
+stack_name = "nyc-transit-alerts-staging"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+
+[staging.deploy.parameters]
+template_file = "template.yaml"
+s3_prefix = "nyc-transit-alerts-staging"
+parameter_overrides = [
+  "Environment=staging",
+  "MtaApiKey=REPLACE_ME",
+  "AllowedOrigin=*"
+]
+
+# ── Dev environment ────────────────────────────────────────────────────────────
+
+[dev.global.parameters]
+stack_name = "nyc-transit-alerts-dev"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+
+[dev.deploy.parameters]
+template_file = "template.yaml"
+s3_prefix = "nyc-transit-alerts-dev"
+parameter_overrides = [
+  "Environment=dev",
+  "MtaApiKey=REPLACE_ME",
+  "AllowedOrigin=*"
+]

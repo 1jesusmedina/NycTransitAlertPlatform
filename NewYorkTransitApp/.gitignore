@@ -1,0 +1,34 @@
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+frontend/dist/
+frontend/.vite/
+backend/dist/
+backend/layers/shared/dist/
+.aws-sam/
+
+# ── Env files — NEVER commit secrets ─────────────────────────────────────────
+.env
+.env.local
+.env.production
+*.env.local
+
+# ── AWS / SAM ─────────────────────────────────────────────────────────────────
+samconfig.toml.bak
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+
+# ── TypeScript ────────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# Stray nested repo
+frontend/NycTransitAlertPlatform

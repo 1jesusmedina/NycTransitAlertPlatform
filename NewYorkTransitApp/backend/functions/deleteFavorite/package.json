@@ -1,0 +1,11 @@
+{
+  "name": "delete-favorite",
+  "version": "1.0.0",
+  "description": "Lambda: remove a transit line from favorites",
+  "main": "index.js",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "typescript": "^5.5.3"
+  }
+}

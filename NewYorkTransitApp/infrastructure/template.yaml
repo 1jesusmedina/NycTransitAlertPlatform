@@ -1,0 +1,392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  NYC Transit Alerts — serverless backend.
+  API Gateway → Lambda → DynamoDB.
+  Includes a scheduled EventBridge rule for MTA feed refresh every 5 minutes.
+
+# ── Parameters ─────────────────────────────────────────────────────────────────
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  MtaApiKey:
+    Type: String
+    NoEcho: true
+    Description: MTA Bus Time / Subway API key (from https://api.mta.info/)
+
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+    Description: >
+      CORS allowed origin for API responses.
+      Set to your CloudFront distribution URL in production
+      (e.g. https://d1234abcd.cloudfront.net).
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+
+# ── Globals ─────────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]       # Graviton2 — cheaper + faster cold starts
+    MemorySize: 256
+    Timeout: 15
+    Tracing: Active              # AWS X-Ray
+    Layers:
+      - !Ref SharedLayer
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref AlertsTable
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        NODE_OPTIONS: '--enable-source-maps'
+    Tags:
+      Project: nyc-transit-alerts
+      Environment: !Ref Environment
+
+# ── Resources ──────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── Shared Lambda Layer ───────────────────────────────────────────────────────
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub nyc-transit-shared-${Environment}
+      Description: Shared utilities (DynamoDB client, response helpers, MTA client)
+      ContentUri: ../backend/layers/shared/
+      CompatibleRuntimes: [nodejs20.x]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  # ── DynamoDB Table ────────────────────────────────────────────────────────────
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain          # Protect data on stack delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub nyc-transit-alerts-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true            # Encryption at rest
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: nyc-transit-alerts
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── API Gateway ───────────────────────────────────────────────────────────────
+  TransitApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub nyc-transit-api-${Environment}
+      StageName: !Ref Environment
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+        MaxAge: "'600'"
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+          LoggingLevel: ERROR
+          MetricsEnabled: true
+      Tags:
+        Project: nyc-transit-alerts
+        Environment: !Ref Environment
+
+  # ── IAM Role (shared by all Lambda functions) ─────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub nyc-transit-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt AlertsTable.Arn
+                  - !Sub '${AlertsTable.Arn}/index/*'
+
+  # ── Lambda: GET /alerts and GET /alerts/{id} ──────────────────────────────────
+  GetAlertsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nyc-transit-getAlerts-${Environment}
+      CodeUri: ../backend/functions/getAlerts/
+      Handler: index.handler
+      Description: List and filter MTA service alerts
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          MTA_API_KEY: !Ref MtaApiKey
+      Events:
+        ListAlerts:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /alerts
+            Method: GET
+        GetAlert:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /alerts/{id}
+            Method: GET
+        OptionsAlerts:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /alerts
+            Method: OPTIONS
+        OptionsAlert:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /alerts/{id}
+            Method: OPTIONS
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  GetAlertsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/nyc-transit-getAlerts-${Environment}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── Lambda: GET /favorites/{userId} ──────────────────────────────────────────
+  GetFavoritesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nyc-transit-getFavorites-${Environment}
+      CodeUri: ../backend/functions/getFavorites/
+      Handler: index.handler
+      Description: List a user's favorite transit lines
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        GetFavorites:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /favorites/{userId}
+            Method: GET
+        OptionsFavorites:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /favorites/{userId}
+            Method: OPTIONS
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  GetFavoritesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/nyc-transit-getFavorites-${Environment}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── Lambda: POST /favorites/{userId} ─────────────────────────────────────────
+  SaveFavoriteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nyc-transit-saveFavorite-${Environment}
+      CodeUri: ../backend/functions/saveFavorite/
+      Handler: index.handler
+      Description: Save a transit line as a favorite
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SaveFavorite:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /favorites/{userId}
+            Method: POST
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  SaveFavoriteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/nyc-transit-saveFavorite-${Environment}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── Lambda: DELETE /favorites/{userId}/{lineId} ───────────────────────────────
+  DeleteFavoriteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nyc-transit-deleteFavorite-${Environment}
+      CodeUri: ../backend/functions/deleteFavorite/
+      Handler: index.handler
+      Description: Remove a transit line from favorites
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        DeleteFavorite:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /favorites/{userId}/{lineId}
+            Method: DELETE
+        OptionsDeleteFavorite:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TransitApi
+            Path: /favorites/{userId}/{lineId}
+            Method: OPTIONS
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  DeleteFavoriteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/nyc-transit-deleteFavorite-${Environment}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── Lambda: Scheduled MTA feed refresh ───────────────────────────────────────
+  RefreshAlertsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nyc-transit-refreshAlerts-${Environment}
+      CodeUri: ../backend/functions/refreshAlerts/
+      Handler: index.handler
+      Description: Fetch MTA GTFS-RT feed and upsert into DynamoDB (runs every 5 min)
+      Timeout: 60
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          MTA_API_KEY: !Ref MtaApiKey
+      Events:
+        ScheduledRefresh:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Name: !Sub nyc-transit-refresh-${Environment}
+            Description: Refresh MTA service alerts every 5 minutes
+            Enabled: true
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  RefreshAlertsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/nyc-transit-refreshAlerts-${Environment}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+  GetAlertsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub nyc-transit-getAlerts-errors-${Environment}
+      AlarmDescription: getAlerts Lambda error rate > 5% over 5 minutes
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref GetAlertsFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  RefreshAlertsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub nyc-transit-refreshAlerts-errors-${Environment}
+      AlarmDescription: refreshAlerts Lambda failed (MTA feed issue)
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RefreshAlertsFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+# ── Outputs ─────────────────────────────────────────────────────────────────────
+Outputs:
+  ApiBaseUrl:
+    Description: API Gateway base URL — set as VITE_API_BASE_URL in frontend .env
+    Value: !Sub 'https://${TransitApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub nyc-transit-api-url-${Environment}
+
+  AlertsTableName:
+    Description: DynamoDB table name
+    Value: !Ref AlertsTable
+    Export:
+      Name: !Sub nyc-transit-table-${Environment}
+
+  AlertsTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt AlertsTable.Arn

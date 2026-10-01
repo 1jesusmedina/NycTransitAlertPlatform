@@ -1,0 +1,17 @@
+{
+  "name": "nyc-transit-shared",
+  "version": "1.0.0",
+  "description": "Shared utilities for NYC Transit Alerts Lambda functions",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.654.0",
+    "@aws-sdk/lib-dynamodb": "^3.654.0",
+    "gtfs-realtime-bindings": "^2.2.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.3"
+  }
+}
