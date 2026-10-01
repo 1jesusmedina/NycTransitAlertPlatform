@@ -1,4 +1,4 @@
-NYC Transit Service Alert Platform 🚇
+NYC Transit Service Alert Platform 
 
 A serverless AWS application for delivering real-time NYC transit service alerts through a scalable, low-maintenance architecture. The platform allows users to view, search, and filter subway service disruptions by line.
 
